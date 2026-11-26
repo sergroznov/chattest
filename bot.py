@@ -3,8 +3,8 @@
 
 Как работает:
 1. Вы пишете боту в личку (это "пульт управления").
-2. Выбираете, от чьего имени сообщение (кнопки "Клиент", "Мастер" и т.д.).
-3. Бот пересылает текст в нужный чат с подписью: "Клиент: текст".
+2. Бот пересылает ваш текст в целевой чат.
+3. По желанию к тексту добавляется подпись ("Клиент: текст") - включается кнопкой.
 
 Время сообщения всегда настоящее - его ставит сам Telegram.
 """
@@ -31,44 +31,65 @@ SENDERS = [s.strip() for s in os.getenv("SENDERS", "Клиент,Мастер").
 
 only_owner = filters.User(user_id=OWNER_ID)
 
+TOGGLE_SIGN = "toggle_sign"  # служебное значение для кнопки "Подпись"
 
-def sender_keyboard(current: str | None) -> InlineKeyboardMarkup:
-    """Кнопки выбора отправителя. Выбранный помечаем галочкой."""
-    buttons = [
+
+def panel(context: ContextTypes.DEFAULT_TYPE) -> InlineKeyboardMarkup:
+    """Кнопки пульта: выбор отправителя + переключатель подписи."""
+    current = context.user_data.get("sender", SENDERS[0])
+    sign_on = context.user_data.get("sign", False)
+
+    sender_row = [
         InlineKeyboardButton(("✅ " if name == current else "") + name, callback_data=name)
         for name in SENDERS
     ]
-    return InlineKeyboardMarkup([buttons])
+    sign_row = [
+        InlineKeyboardButton(
+            "Подпись: включена" if sign_on else "Подпись: выключена",
+            callback_data=TOGGLE_SIGN,
+        )
+    ]
+    return InlineKeyboardMarkup([sign_row, sender_row])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    current = context.user_data.get("sender", SENDERS[0])
-    context.user_data["sender"] = current
+    context.user_data.setdefault("sender", SENDERS[0])
+    context.user_data.setdefault("sign", False)
     await update.message.reply_text(
         "Пульт управления.\n"
-        "Выберите, от чьего имени писать, и просто отправляйте текст - "
-        "я перешлю его в целевой чат с подписью.",
-        reply_markup=sender_keyboard(current),
+        "Просто отправляйте текст - я перешлю его в целевой чат.\n"
+        "Кнопкой можно включить подпись отправителя.",
+        reply_markup=panel(context),
     )
 
 
-async def choose_sender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    if query.from_user.id != OWNER_ID:
+        await query.answer()
+        return
     await query.answer()
-    context.user_data["sender"] = query.data
-    await query.edit_message_reply_markup(reply_markup=sender_keyboard(query.data))
+
+    if query.data == TOGGLE_SIGN:
+        context.user_data["sign"] = not context.user_data.get("sign", False)
+    else:
+        context.user_data["sender"] = query.data
+
+    await query.edit_message_reply_markup(reply_markup=panel(context))
 
 
 async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    sender = context.user_data.get("sender", SENDERS[0])
     text = update.message.text
-    await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=f"{sender}: {text}")
+    if context.user_data.get("sign", False):
+        sender = context.user_data.get("sender", SENDERS[0])
+        text = f"{sender}: {text}"
+    await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=text)
 
 
 def main() -> None:
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start, filters=only_owner))
-    app.add_handler(CallbackQueryHandler(choose_sender))
+    app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(only_owner & filters.TEXT & ~filters.COMMAND, relay))
     app.run_polling()
 
